@@ -110,7 +110,7 @@ void ScreenshotCapture::startScrollCapture()
         updateGlobalRegion(m_baseImage, baseRect);
         
         // 将基础图片记录到已覆盖区域（重要：防止重复截取基础内容）
-        addToCoveredRegions(m_baseImage, baseRect, ScrollDirection::None);
+        addToCoveredRegions(m_baseImage, baseRect, ScrollDirection::None, 0);
         
         m_captureCount++;
         emit newImageCaptured(m_baseImage);
@@ -503,17 +503,14 @@ OverlapResult ScreenshotCapture::findOverlapRegion(const QImage& img1, const QIm
     return result;
 }
 
-QPixmap ScreenshotCapture::extractNewContent(const QPixmap& newImage, const ScrollInfo& scrollInfo)
-{
-    if (scrollInfo.direction == ScrollDirection::None || newImage.isNull()) {
-        return QPixmap();
+QImage ScreenshotCapture::extractNewContent(const QImage& newImage, const ScrollInfo& scrollInfo) {
+    if (newImage.isNull() || !scrollInfo.hasScroll) {
+        return QImage();
     }
-    
+
     // 直接根据scrollInfo中计算好的newContentRect提取新内容
-    QImage newContent = newImage.toImage().copy(scrollInfo.newContentRect);
-    
+    QImage newContent = newImage.copy(scrollInfo.newContentRect);
     qDebug() << "✂️ 提取新内容 - 区域:" << scrollInfo.newContentRect << "结果尺寸:" << newContent.size();
-    
     return newContent;
 }
 
@@ -617,7 +614,7 @@ void ScreenshotCapture::updateGlobalRegion(const QPixmap& image, const QRect& lo
     GlobalContentRegion newRegion;
     newRegion.image = image;
     newRegion.logicalRect = logicalRect;
-    newRegion.globalYOffset = logicalRect.y();
+    newRegion.order = m_globalRegions.size() + 1;
     m_globalRegions.append(newRegion);
     
     // 扩展全局边界
@@ -626,9 +623,6 @@ void ScreenshotCapture::updateGlobalRegion(const QPixmap& image, const QRect& lo
     } else {
         m_globalBounds = m_globalBounds.united(logicalRect);
     }
-    
-    // 只在关键时刻输出区域信息，减少无用输出
-    // 不再频繁输出区域更新信息
 }
 
 void ScreenshotCapture::addNewContent(const QImage& newContent, const ScrollInfo& scrollInfo)
@@ -990,10 +984,9 @@ void ScreenshotCapture::addToCoveredRegions(const QPixmap& newContent, const QRe
     }
     
     // 记录关键信息
-    if (m_coveredRegions.size() <= 10 || m_coveredRegions.size() % 50 == 0) {
-        qDebug() << "覆盖区域管理：总数" << m_coveredRegions.size() 
-                 << "方向" << (int)direction << "区域" << logicalRect;
-    }
+    qDebug() << "覆盖区域管理：总数" << m_coveredRegions.size() 
+             << "方向" << (direction == ScrollDirection::Down ? "↓" : direction == ScrollDirection::Up ? "↑" : "初始")
+             << "区域" << logicalRect;
 }
 
 void ScreenshotCapture::cleanupOldCoveredRegions()
@@ -1030,4 +1023,12 @@ QImage ScreenshotCapture::createContentHash(const QPixmap& content)
     QImage hash = img.scaled(50, 50, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     
     return hash;
+} 
+
+void ScreenshotCapture::updateGlobalBounds(const QRect& rect) {
+    if (m_globalBounds.isEmpty()) {
+        m_globalBounds = rect;
+    } else {
+        m_globalBounds = m_globalBounds.united(rect);
+    }
 } 

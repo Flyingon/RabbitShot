@@ -35,12 +35,6 @@ struct ContentSegment {
     bool isBaseImage;   // 是否为基础图片
 };
 
-struct GlobalContentRegion {
-    QRect logicalRect;    // 逻辑坐标系中的区域
-    QPixmap image;        // 对应的图像内容
-    int globalYOffset;    // 在全局拼接图中的Y偏移
-};
-
 // 用于返回重叠区域检测结果的结构体
 struct OverlapResult {
     QRect rect;
@@ -56,6 +50,15 @@ struct CoveredRegion {
     int captureOrder;           // 截取顺序
     qint64 captureTimestamp;    // 截取时间戳
     QRect actualScreenRect;     // 实际屏幕坐标（用于重叠检测）
+};
+
+// 全局内容区域结构
+struct GlobalContentRegion {
+    QRect logicalRect;
+    QPixmap image;
+    int overlapHeight = 0;
+    ScrollDirection scrollDirection = ScrollDirection::None;
+    int order = 0;
 };
 
 class ScreenshotCapture : public QObject
@@ -106,7 +109,7 @@ private slots:
     void onScrollDetectionTimer();
 
 private:
-    // 滚动检测和内容提取
+    void updateGlobalBounds(const QRect& rect);
     ScrollInfo detectScroll(const QImage& lastImg, const QImage& newImg);
     double calculateImageSimilarity(const QImage& img1, const QImage& img2, const QRect& rect);
     double calculateImageSimilarity(const QImage& img1, const QImage& img2, const QRect& rect1, const QRect& rect2);
