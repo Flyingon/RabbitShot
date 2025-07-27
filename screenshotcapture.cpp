@@ -458,48 +458,34 @@ OverlapResult ScreenshotCapture::findOverlapRegion(const QImage& img1, const QIm
     if (img1.size() != img2.size() || img1.isNull() || img2.isNull()) {
         return result;
     }
-
     int width = img1.width();
     int height = img1.height();
-    // 限制搜索范围，避免检测到过大的滚动距离
-    int maxSearchHeight = qMin(100, height / 4);  // 最多搜索100像素或1/4屏幕高度
-
-    for (int offset = MIN_SCROLL_DISTANCE; offset <= maxSearchHeight; ++offset) {
+    int maxSearchHeight = qMin(height / 2, 300); // 扩大搜索范围
+    for (int offset = 5; offset <= maxSearchHeight; ++offset) {
         QRect region1, region2;
         if (direction == ScrollDirection::Down) {
             region1 = QRect(0, height - offset, width, offset);
             region2 = QRect(0, 0, width, offset);
-        } else { // ScrollDirection::Up
+        } else {
             region1 = QRect(0, 0, width, offset);
             region2 = QRect(0, height - offset, width, offset);
         }
-
         double similarity = calculateImageSimilarity(img1, img2, region1, region2);
-        
-        // 一旦找到足够好的匹配（相似度超过阈值），立即返回，不再寻找更大的偏移
-        if (similarity > SIMILARITY_THRESHOLD) {
+        if (similarity > 0.80 && offset > 5) { // 进一步降低阈值
             result.similarity = similarity;
-            result.rect = (direction == ScrollDirection::Down) ? 
-                          QRect(0, height - offset, width, offset) : 
-                          QRect(0, 0, width, offset);
+            result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
             qDebug() << "找到滚动匹配 - 距离:" << offset << "像素，相似度:" << similarity;
-            break;  // 找到合适匹配就停止搜索
+            break;
         }
-        
-        // 如果当前相似度更高，更新结果（但继续搜索更小的偏移）
         if (similarity > result.similarity) {
             result.similarity = similarity;
-            result.rect = (direction == ScrollDirection::Down) ? 
-                          QRect(0, height - offset, width, offset) : 
-                          QRect(0, 0, width, offset);
+            result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
         }
     }
-
-    if (result.similarity < SIMILARITY_THRESHOLD || result.rect.height() < MIN_OVERLAP_HEIGHT) {
-        result.rect = QRect(); // 不满足条件，返回空区域
+    if (result.similarity < 0.80 || result.rect.height() < 5) {
+        result.rect = QRect();
         qDebug() << "未找到有效的滚动匹配，最高相似度:" << result.similarity;
     }
-
     return result;
 }
 
@@ -507,8 +493,10 @@ QImage ScreenshotCapture::extractNewContent(const QImage& newImage, const Scroll
     if (newImage.isNull() || !scrollInfo.hasScroll) {
         return QImage();
     }
-
-    // 直接根据scrollInfo中计算好的newContentRect提取新内容
+    if (scrollInfo.newContentRect.height() < 15) { // 新内容太小直接忽略
+        qDebug() << "新内容高度过小，跳过拼接:" << scrollInfo.newContentRect;
+        return QImage();
+    }
     QImage newContent = newImage.copy(scrollInfo.newContentRect);
     qDebug() << "✂️ 提取新内容 - 区域:" << scrollInfo.newContentRect << "结果尺寸:" << newContent.size();
     return newContent;
@@ -519,46 +507,32 @@ bool ScreenshotCapture::isContentDuplicate(const QPixmap& newContent, const Scro
     if (newContent.isNull() || m_globalRegions.isEmpty()) {
         return false;
     }
-    
     QImage newImg = newContent.toImage();
-    
-    // 直接与所有已存在的图像进行比较
     for (const GlobalContentRegion& region : m_globalRegions) {
         QImage existingImg = region.image.toImage();
-        
-        // 如果尺寸相同，直接比较整个图像
+        // 完全重复判定（较低阈值）
         if (newImg.size() == existingImg.size()) {
-            double similarity = calculateImageSimilarity(newImg, existingImg, 
-                QRect(0, 0, newImg.width(), newImg.height()));
-            
-            if (similarity > 0.7) {  // 70%以上相似度认为是重复
-                qDebug() << "检测到完全重复内容，相似度：" << similarity 
-                         << "新内容尺寸：" << newImg.size() 
-                         << "已存在区域：" << region.logicalRect;
+            double similarity = calculateImageSimilarity(newImg, existingImg, QRect(0, 0, newImg.width(), newImg.height()));
+            qDebug() << "[去重] 完全重复判定，相似度：" << similarity;
+            if (similarity > 0.95) {
+                qDebug() << "检测到完全重复内容，相似度：" << similarity << "新内容尺寸：" << newImg.size() << "已存在区域：" << region.logicalRect;
                 return true;
             }
         }
-        
-        // 检查部分重叠
+        // 检查部分重叠（较低阈值+重叠高度限制）
         if (newImg.height() <= region.image.height() && newImg.width() == region.image.width()) {
-            // 检查新内容是否是现有内容的一部分
-            for (int yOffset = 0; yOffset <= region.image.height() - newImg.height(); yOffset += 10) {
+            for (int yOffset = 0; yOffset <= region.image.height() - newImg.height(); yOffset += 5) {
                 QRect checkRect(0, yOffset, newImg.width(), newImg.height());
                 QRect newRect(0, 0, newImg.width(), newImg.height());
-                
-                double similarity = calculateImageSimilarity(newImg, existingImg, 
-                                                           newRect, checkRect);
-                
-                if (similarity > 0.7) {
-                    qDebug() << "检测到部分重复内容，相似度：" << similarity 
-                             << "Y偏移：" << yOffset 
-                             << "新内容尺寸：" << newImg.size();
+                double similarity = calculateImageSimilarity(newImg, existingImg, newRect, checkRect);
+                qDebug() << "[去重] 部分重叠判定，相似度：" << similarity << "Y偏移：" << yOffset;
+                if (similarity > 0.90 && newImg.height() > 15) {
+                    qDebug() << "检测到部分重复内容，相似度：" << similarity << "Y偏移：" << yOffset << "新内容尺寸：" << newImg.size();
                     return true;
                 }
             }
         }
     }
-    
     return false;
 }
 
@@ -567,45 +541,28 @@ bool ScreenshotCapture::isContentInGlobalRegion(const QPixmap& newContent, const
     if (newContent.isNull() || m_globalRegions.isEmpty()) {
         return false;
     }
-    
     QImage newImg = newContent.toImage();
-    
-    // 检查与所有全局区域的重叠
     for (const GlobalContentRegion& region : m_globalRegions) {
-        // 检查逻辑坐标是否有重叠
         QRect intersection = logicalRect.intersected(region.logicalRect);
         if (intersection.isEmpty()) {
             continue;
         }
-        
-        // 计算重叠区域的相似度
         int overlapHeight = intersection.height();
-        if (overlapHeight < 20) {  // 重叠太小，忽略
+        if (overlapHeight < 15) { // 降低重叠高度阈值
             continue;
         }
-        
-        // 提取重叠区域进行比较
-        QRect newContentOverlap = QRect(0, intersection.y() - logicalRect.y(), 
-                                       intersection.width(), overlapHeight);
-        QRect existingOverlap = QRect(0, intersection.y() - region.logicalRect.y(),
-                                     intersection.width(), overlapHeight);
-        
-        // 确保区域有效
-        if (newContentOverlap.y() < 0 || newContentOverlap.bottom() > newImg.height() ||
-            existingOverlap.y() < 0 || existingOverlap.bottom() > region.image.height()) {
+        QRect newContentOverlap = QRect(0, intersection.y() - logicalRect.y(), intersection.width(), overlapHeight);
+        QRect existingOverlap = QRect(0, intersection.y() - region.logicalRect.y(), intersection.width(), overlapHeight);
+        if (newContentOverlap.y() < 0 || newContentOverlap.bottom() > newImg.height() || existingOverlap.y() < 0 || existingOverlap.bottom() > region.image.height()) {
             continue;
         }
-        
-        // 计算相似度
         QImage existingImg = region.image.toImage();
-        double similarity = calculateImageSimilarity(newImg, existingImg, 
-                                                   newContentOverlap, existingOverlap);
-        
-        if (similarity > 0.8) {  // 80%以上相似度认为是重复（提高阈值）
+        double similarity = calculateImageSimilarity(newImg, existingImg, newContentOverlap, existingOverlap);
+        qDebug() << "[全局重叠] 判定相似度：" << similarity;
+        if (similarity > 0.92) { // 降低阈值
             return true;
         }
     }
-    
     return false;
 }
 
@@ -627,6 +584,10 @@ void ScreenshotCapture::updateGlobalRegion(const QPixmap& image, const QRect& lo
 
 void ScreenshotCapture::addNewContent(const QImage& newContent, const ScrollInfo& scrollInfo)
 {
+    if (newContent.isNull() || newContent.height() < 15) { // 新内容无效或太小
+        qDebug() << "新内容无效或高度过小，跳过拼接:" << newContent.size();
+        return;
+    }
     if (!newContent.isNull()) {
         // 现在newContent已经是纯净的新内容，不包含重叠部分
         QRect logicalRect;
