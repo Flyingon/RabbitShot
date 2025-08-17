@@ -164,12 +164,12 @@ private:
     
     // 滚动检测参数
     static const int DEFAULT_DETECTION_INTERVAL = 200;  // 200ms检测间隔（降低频率，提高稳定性）
-    static constexpr double SIMILARITY_THRESHOLD = 0.80;    // 相似度阈值（提高敏感度）
-    static const int MIN_SCROLL_DISTANCE = 15;          // 最小滚动距离（降低最小距离）
-    static const int OVERLAP_SEARCH_HEIGHT = 200;       // 重叠搜索高度（增加搜索范围）
-    static const int MIN_NEW_CONTENT_HEIGHT = 10;       // 最小新内容高度（允许较小的滚动）
-    static const int MIN_OVERLAP_HEIGHT = 10;           // 最小重叠高度
-    static const int MAX_ALLOWED_DUPLICATES = 3;        // 最大允许连续重复次数
+    static constexpr double SIMILARITY_THRESHOLD = 0.75;    // 相似度阈值（适度放宽，提升匹配成功率）
+     static const int MIN_SCROLL_DISTANCE = 15;          // 最小滚动距离（降低最小距离）
+     static const int OVERLAP_SEARCH_HEIGHT = 200;       // 重叠搜索高度（增加搜索范围）
+     static const int MIN_NEW_CONTENT_HEIGHT = 10;       // 最小新内容高度（允许较小的滚动）
+     static const int MIN_OVERLAP_HEIGHT = 10;           // 最小重叠高度
+     static const int MAX_ALLOWED_DUPLICATES = 3;        // 最大允许连续重复次数
 };
 
-#endif // SCREENSHOTCAPTURE_H 
+#endif // SCREENSHOTCAPTURE_H

@@ -352,22 +352,22 @@ ScrollInfo ScreenshotCapture::detectScroll(const QImage& lastImg, const QImage& 
 
     if (downIsValid && (!upIsValid || downResult.similarity > upResult.similarity)) {
         info.direction = ScrollDirection::Down;
-        info.offset = downResult.rect.height();  // 滚动距离
+        info.offset = downResult.rect.height();  // 重叠高度
         info.hasScroll = true;
         
-        // 向下滚动：新截图的顶部是新内容，底部是重叠
-        info.overlapRect = QRect(0, info.offset, newImg.width(), newImg.height() - info.offset);  // 新截图中的重叠区域
-        info.newContentRect = QRect(0, 0, newImg.width(), info.offset);  // 新截图中的新内容区域
+        // 向下滚动：新截图的顶部是重叠区域，底部是新内容
+        info.overlapRect = QRect(0, 0, newImg.width(), info.offset);                 // 新图中的重叠部分（顶部）
+        info.newContentRect = QRect(0, info.offset, newImg.width(), newImg.height() - info.offset); // 新图中的新内容（底部）
         
         qDebug() << "检测到向下滚动，相似度：" << downResult.similarity << "滚动距离：" << info.offset;
     } else if (upIsValid && (!downIsValid || upResult.similarity > downResult.similarity)) {
         info.direction = ScrollDirection::Up;
-        info.offset = upResult.rect.height();  // 滚动距离
+        info.offset = upResult.rect.height();  // 重叠高度
         info.hasScroll = true;
         
-        // 向上滚动：新截图的底部是新内容，顶部是重叠
-        info.overlapRect = QRect(0, 0, newImg.width(), newImg.height() - info.offset);  // 新截图中的重叠区域
-        info.newContentRect = QRect(0, newImg.height() - info.offset, newImg.width(), info.offset);  // 新截图中的新内容区域
+        // 向上滚动：新截图的底部是重叠区域，顶部是新内容
+        info.overlapRect = QRect(0, newImg.height() - info.offset, newImg.width(), info.offset); // 新图中的重叠部分（底部）
+        info.newContentRect = QRect(0, 0, newImg.width(), newImg.height() - info.offset);        // 新图中的新内容（顶部）
         
         qDebug() << "检测到向上滚动，相似度：" << upResult.similarity << "滚动距离：" << info.offset;
     }
@@ -460,33 +460,33 @@ OverlapResult ScreenshotCapture::findOverlapRegion(const QImage& img1, const QIm
     }
     int width = img1.width();
     int height = img1.height();
-    int maxSearchHeight = qMin(height / 2, 300); // 扩大搜索范围
-    for (int offset = 5; offset <= maxSearchHeight; ++offset) {
-        QRect region1, region2;
-        if (direction == ScrollDirection::Down) {
-            region1 = QRect(0, height - offset, width, offset);
-            region2 = QRect(0, 0, width, offset);
-        } else {
-            region1 = QRect(0, 0, width, offset);
-            region2 = QRect(0, height - offset, width, offset);
-        }
-        double similarity = calculateImageSimilarity(img1, img2, region1, region2);
-        if (similarity > 0.80 && offset > 5) { // 进一步降低阈值
-            result.similarity = similarity;
-            result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
-            qDebug() << "找到滚动匹配 - 距离:" << offset << "像素，相似度:" << similarity;
-            break;
-        }
-        if (similarity > result.similarity) {
-            result.similarity = similarity;
-            result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
-        }
-    }
-    if (result.similarity < 0.80 || result.rect.height() < 5) {
-        result.rect = QRect();
-        qDebug() << "未找到有效的滚动匹配，最高相似度:" << result.similarity;
-    }
-    return result;
+    int maxSearchHeight = qMin(height / 2, OVERLAP_SEARCH_HEIGHT); // 使用常量控制搜索高度
+    for (int offset = MIN_OVERLAP_HEIGHT; offset <= maxSearchHeight; ++offset) {
+         QRect region1, region2;
+         if (direction == ScrollDirection::Down) {
+             region1 = QRect(0, height - offset, width, offset);
+             region2 = QRect(0, 0, width, offset);
+         } else {
+             region1 = QRect(0, 0, width, offset);
+             region2 = QRect(0, height - offset, width, offset);
+         }
+         double similarity = calculateImageSimilarity(img1, img2, region1, region2);
+         if (similarity >= SIMILARITY_THRESHOLD) {
+             result.similarity = similarity;
+             result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
+             qDebug() << "找到滚动匹配 - 距离:" << offset << "像素，相似度:" << similarity;
+             break;
+         }
+         if (similarity > result.similarity) {
+             result.similarity = similarity;
+             result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
+         }
+     }
+     if (result.similarity < SIMILARITY_THRESHOLD || result.rect.height() < MIN_OVERLAP_HEIGHT) {
+         result.rect = QRect();
+         qDebug() << "未找到有效的滚动匹配，最高相似度:" << result.similarity;
+     }
+     return result;
 }
 
 QImage ScreenshotCapture::extractNewContent(const QImage& newImage, const ScrollInfo& scrollInfo) {
@@ -992,4 +992,4 @@ void ScreenshotCapture::updateGlobalBounds(const QRect& rect) {
     } else {
         m_globalBounds = m_globalBounds.united(rect);
     }
-} 
+}
