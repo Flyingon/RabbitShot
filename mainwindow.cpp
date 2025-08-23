@@ -393,6 +393,9 @@ void MainWindow::startCaptureWithDelay()
     // 开始捕获
     m_screenshotCapture->startScrollCapture();
     
+    // 安装应用级事件过滤器，监听滚轮事件来更及时地触发拼接
+    qApp->installEventFilter(m_screenshotCapture);
+    
     // 预览窗口已经在选择确认时显示，这里不需要再次显示
     // showPreviewOutsideCaptureArea();
     
@@ -405,6 +408,9 @@ void MainWindow::onStopScrollScreenshot()
         return;
     }
     
+    // 移除事件过滤器，避免在非截图状态下拦截事件
+    qApp->removeEventFilter(m_screenshotCapture);
+
     m_screenshotCapture->stopScrollCapture();
     
     m_isCapturing = false;

@@ -8,11 +8,19 @@
 #include <algorithm>
 #include <QCryptographicHash> // Added for content fingerprinting
 #include <QThread>            // Added for msleep function
+// 新增：OpenCV 头
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
 
 // 静态常量定义
 const int ScreenshotCapture::DEFAULT_DETECTION_INTERVAL;
 const int ScreenshotCapture::MIN_SCROLL_DISTANCE;
 const int ScreenshotCapture::OVERLAP_SEARCH_HEIGHT;
+const int ScreenshotCapture::MIN_NEW_CONTENT_HEIGHT;
+const int ScreenshotCapture::MIN_OVERLAP_HEIGHT;
+const int ScreenshotCapture::MAX_ALLOWED_DUPLICATES;
+const int ScreenshotCapture::TEMPLATE_HEIGHT;
+const int ScreenshotCapture::FIXED_REGION_DETECTION_HEIGHT;
 
 ScreenshotCapture::ScreenshotCapture(QObject *parent)
     : QObject(parent)
@@ -112,6 +120,13 @@ void ScreenshotCapture::startScrollCapture()
         // 将基础图片记录到已覆盖区域（重要：防止重复截取基础内容）
         addToCoveredRegions(m_baseImage, baseRect, ScrollDirection::None, 0);
         
+        // 简单自动识别固定区域（顶部/底部单调色带等），以便在匹配时忽略
+        m_fixedRegions = detectFixedRegions(m_baseImage.toImage());
+        if (m_fixedRegions.hasTopRegion || m_fixedRegions.hasBottomRegion) {
+            qDebug() << "🔒 检测到固定区域 - 顶部高:" << (m_fixedRegions.hasTopRegion ? m_fixedRegions.topRegion.height() : 0)
+                     << " 底部高:" << (m_fixedRegions.hasBottomRegion ? m_fixedRegions.bottomRegion.height() : 0);
+        }
+        
         m_captureCount++;
         emit newImageCaptured(m_baseImage);
         emit captureStatusChanged("正在监听滚动...");
@@ -169,13 +184,26 @@ void ScreenshotCapture::stopScrollCapture()
 
 QPixmap ScreenshotCapture::getCombinedImage() const
 {
-    return m_combinedImage;
+    // 返回当前合成图（按需合成）
+    return combineImages();
 }
 
 QPixmap ScreenshotCapture::getCurrentCombinedImage() const
 {
-    // 实时拼接当前已捕获的图片
+    // 若已有缓存则返回，否则按需合成
+    if (!m_combinedImage.isNull()) {
+        return m_combinedImage;
+    }
     return combineImages();
+}
+
+void ScreenshotCapture::setDetectionInterval(int interval)
+{
+    if (interval <= 0) return;
+    m_detectionInterval = interval;
+    if (m_detectionTimer) {
+        m_detectionTimer->setInterval(m_detectionInterval);
+    }
 }
 
 QList<QPixmap> ScreenshotCapture::getCapturedImages() const
@@ -206,13 +234,7 @@ void ScreenshotCapture::clearCapturedImages()
     m_lastCleanupTime = 0;
 }
 
-void ScreenshotCapture::setDetectionInterval(int intervalMs)
-{
-    m_detectionInterval = intervalMs;
-    if (m_detectionTimer && m_detectionTimer->isActive()) {
-        m_detectionTimer->start(m_detectionInterval);
-    }
-}
+// removed duplicate setDetectionInterval(int) implementation; unified in the earlier definition.
 
 bool ScreenshotCapture::isCapturing() const
 {
@@ -241,6 +263,7 @@ void ScreenshotCapture::onScrollDetectionTimer()
     ScrollInfo scrollInfo = detectScroll(m_lastScreenshot.toImage(), currentScreenshot.toImage());
     
     if (scrollInfo.hasScroll) {
+        emit scrollDetected(scrollInfo.direction, scrollInfo.offset);
         // 验证新内容是否有效
         if (scrollInfo.newContentRect.height() < MIN_NEW_CONTENT_HEIGHT) {
             qDebug() << "新内容高度过小，跳过此次捕获：" << scrollInfo.newContentRect.height();
@@ -452,41 +475,132 @@ double ScreenshotCapture::calculateImageSimilarity(const QImage& img1, const QIm
     return double(similarPixels) / (totalPixels / 4); // 采样了1/4的像素
 }
 
+// 可选：新增开关与阈值设置
+void ScreenshotCapture::enableAdvancedStitching(bool enabled)
+{
+    m_useAdvancedStitching = enabled;
+}
+
+void ScreenshotCapture::setTemplateMatchThreshold(double threshold)
+{
+    m_templateMatchThreshold = threshold;
+}
+
+void ScreenshotCapture::setFixedRegions(const FixedRegion& regions)
+{
+    m_fixedRegions = regions;
+}
+
+// 将 QImage 转换为 OpenCV BGR Mat
+cv::Mat ScreenshotCapture::qImageToCvBgr(const QImage& qImage) const
+{
+    if (qImage.isNull()) return cv::Mat();
+    QImage img = qImage.convertToFormat(QImage::Format_ARGB32);
+    cv::Mat bgra(img.height(), img.width(), CV_8UC4, const_cast<uchar*>(img.bits()), img.bytesPerLine());
+    cv::Mat bgr;
+    cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
+    return bgr;
+}
+
+// 用 OpenCV 模板匹配实现重叠区域检测（CV_TM_CCOEFF_NORMED）
 OverlapResult ScreenshotCapture::findOverlapRegion(const QImage& img1, const QImage& img2, ScrollDirection direction)
 {
     OverlapResult result;
-    if (img1.size() != img2.size() || img1.isNull() || img2.isNull()) {
+    if (!m_useAdvancedStitching) {
+        // 回退到原有实现（如果需要，可在此保留旧逻辑）
         return result;
     }
-    int width = img1.width();
-    int height = img1.height();
-    int maxSearchHeight = qMin(height / 2, OVERLAP_SEARCH_HEIGHT); // 使用常量控制搜索高度
-    for (int offset = MIN_OVERLAP_HEIGHT; offset <= maxSearchHeight; ++offset) {
-         QRect region1, region2;
-         if (direction == ScrollDirection::Down) {
-             region1 = QRect(0, height - offset, width, offset);
-             region2 = QRect(0, 0, width, offset);
-         } else {
-             region1 = QRect(0, 0, width, offset);
-             region2 = QRect(0, height - offset, width, offset);
-         }
-         double similarity = calculateImageSimilarity(img1, img2, region1, region2);
-         if (similarity >= SIMILARITY_THRESHOLD) {
-             result.similarity = similarity;
-             result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
-             qDebug() << "找到滚动匹配 - 距离:" << offset << "像素，相似度:" << similarity;
-             break;
-         }
-         if (similarity > result.similarity) {
-             result.similarity = similarity;
-             result.rect = (direction == ScrollDirection::Down) ? QRect(0, height - offset, width, offset) : QRect(0, 0, width, offset);
-         }
-     }
-     if (result.similarity < SIMILARITY_THRESHOLD || result.rect.height() < MIN_OVERLAP_HEIGHT) {
-         result.rect = QRect();
-         qDebug() << "未找到有效的滚动匹配，最高相似度:" << result.similarity;
-     }
-     return result;
+
+    if (img1.isNull() || img2.isNull() || img1.size() != img2.size()) {
+        return result;
+    }
+
+    const int origWidth = img1.width();
+    const int origHeight = img1.height();
+
+    // 按固定区域裁剪有效区域，提高匹配鲁棒性
+    int topCrop = (m_fixedRegions.hasTopRegion ? m_fixedRegions.topRegion.height() : 0);
+    int bottomCrop = (m_fixedRegions.hasBottomRegion ? m_fixedRegions.bottomRegion.height() : 0);
+    int effHeight = origHeight - topCrop - bottomCrop;
+    if (effHeight < MIN_OVERLAP_HEIGHT + 5) {
+        // 有效高度过小，放弃匹配
+        return result;
+    }
+
+    QImage img1Eff = img1.copy(0, topCrop, origWidth, effHeight);
+    QImage img2Eff = img2.copy(0, topCrop, origWidth, effHeight);
+
+    cv::Mat src1Bgr = qImageToCvBgr(img1Eff);
+    cv::Mat src2Bgr = qImageToCvBgr(img2Eff);
+    if (src1Bgr.empty() || src2Bgr.empty()) {
+        return result;
+    }
+
+    cv::Mat src1Gray, src2Gray;
+    cv::cvtColor(src1Bgr, src1Gray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(src2Bgr, src2Gray, cv::COLOR_BGR2GRAY);
+
+    int tmplH = std::min(TEMPLATE_HEIGHT, src2Gray.rows);
+    if (tmplH < MIN_OVERLAP_HEIGHT) {
+        return result;
+    }
+
+    cv::Mat tmpl;
+    if (direction == ScrollDirection::Down) {
+        // B 的顶部作为模板（文档策略）
+        tmpl = src2Gray.rowRange(0, tmplH);
+    } else { // ScrollDirection::Up
+        // B 的底部作为模板
+        tmpl = src2Gray.rowRange(src2Gray.rows - tmplH, src2Gray.rows);
+    }
+
+    cv::Mat matchRes;
+    cv::matchTemplate(src1Gray, tmpl, matchRes, cv::TM_CCOEFF_NORMED);
+
+    double minVal = 0.0, maxVal = 0.0;
+    cv::Point minLoc, maxLoc;
+    cv::minMaxLoc(matchRes, &minVal, &maxVal, &minLoc, &maxLoc);
+
+    // 使用可调阈值，默认 0.8
+    const double threshold = m_templateMatchThreshold;
+    if (maxVal < threshold) {
+        // 未达到阈值
+        return result;
+    }
+
+    // 计算重叠高度（基于匹配 y）
+    int overlapHeight = 0;
+    if (direction == ScrollDirection::Down) {
+        // 模板是 B 顶部在 A 中的匹配起点，重叠 = 有效高 - y
+        overlapHeight = effHeight - maxLoc.y;
+        overlapHeight = std::min(overlapHeight, OVERLAP_SEARCH_HEIGHT);
+        if (overlapHeight >= MIN_OVERLAP_HEIGHT && overlapHeight <= effHeight) {
+            result.similarity = maxVal;
+            // 映射回原图坐标：原图底部减去重叠并扣除底部裁剪
+            int yOrig = (origHeight - overlapHeight - bottomCrop);
+            result.rect = QRect(0, yOrig, origWidth, overlapHeight);
+            qDebug() << "OpenCV ↓ 匹配: y=" << maxLoc.y << " 相似度=" << maxVal << " 重叠=" << overlapHeight
+                     << "(裁剪 top=" << topCrop << ", bottom=" << bottomCrop << ")";
+        }
+    } else { // Up
+        // 模板是 B 底部在 A 中的匹配范围，重叠 = y + 模板高度
+        overlapHeight = maxLoc.y + tmpl.rows;
+        overlapHeight = std::min(overlapHeight, OVERLAP_SEARCH_HEIGHT);
+        if (overlapHeight >= MIN_OVERLAP_HEIGHT && overlapHeight <= effHeight) {
+            result.similarity = maxVal;
+            // 映射回原图坐标：原图顶部加上裁剪偏移
+            int yOrig = topCrop;
+            result.rect = QRect(0, yOrig, origWidth, overlapHeight);
+            qDebug() << "OpenCV ↑ 匹配: y=" << maxLoc.y << " 相似度=" << maxVal << " 重叠=" << overlapHeight
+                     << "(裁剪 top=" << topCrop << ", bottom=" << bottomCrop << ")";
+        }
+    }
+
+    // 如果结果仍不满足最小重叠要求，则清空
+    if (result.rect.isEmpty() || result.rect.height() < MIN_OVERLAP_HEIGHT) {
+        result = OverlapResult{};
+    }
+    return result;
 }
 
 QImage ScreenshotCapture::extractNewContent(const QImage& newImage, const ScrollInfo& scrollInfo) {
@@ -992,4 +1106,115 @@ void ScreenshotCapture::updateGlobalBounds(const QRect& rect) {
     } else {
         m_globalBounds = m_globalBounds.united(rect);
     }
+}
+void ScreenshotCapture::processStitchingQueue()
+{
+    // 占位：后续将把拼接任务移至子线程处理
+}
+bool ScreenshotCapture::eventFilter(QObject* obj, QEvent* event)
+{
+    if (!m_isCapturing) return QObject::eventFilter(obj, event);
+    if (event->type() == QEvent::Wheel) {
+        auto* wheel = static_cast<QWheelEvent*>(event);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        // 去抖：限定最小截取间隔
+        if (now - m_lastWheelCaptureMs >= qMax(50, m_detectionInterval/2)) {
+            m_lastWheelCaptureMs = now;
+            // 立即进行一次检测循环：抓取并处理
+            QPixmap current = captureRegion(m_captureRect);
+            if (!current.isNull() && !m_lastScreenshot.isNull()) {
+                ScrollInfo scrollInfo = detectScroll(m_lastScreenshot.toImage(), current.toImage());
+                if (scrollInfo.hasScroll) {
+                    emit scrollDetected(scrollInfo.direction, scrollInfo.offset);
+                    QImage newContent = extractNewContent(current.toImage(), scrollInfo);
+                    if (!newContent.isNull() && newContent.height() >= MIN_NEW_CONTENT_HEIGHT) {
+                        QRect logicalRect;
+                        if (scrollInfo.direction == ScrollDirection::Down) {
+                            logicalRect = QRect(0, m_currentScrollPos, newContent.width(), newContent.height());
+                        } else {
+                            int currentMinY = m_globalBounds.isEmpty() ? 0 : m_globalBounds.top();
+                            logicalRect = QRect(0, currentMinY - newContent.height(), newContent.width(), newContent.height());
+                        }
+                        if (!isContentAlreadyCovered(QPixmap::fromImage(newContent), logicalRect)) {
+                            addNewContent(newContent, scrollInfo);
+                            m_lastScreenshot = current;
+                            emit newImageCaptured(getCombinedImage());
+                        }
+                    }
+                }
+            }
+        }
+        // 不拦截事件，继续传递
+        return false;
+    }
+    return QObject::eventFilter(obj, event);
+}
+
+// 新增：固定区域（顶部/底部）简单检测实现
+FixedRegion ScreenshotCapture::detectFixedRegions(const QImage& image)
+{
+    FixedRegion regions;
+    if (image.isNull()) {
+        return regions;
+    }
+
+    QImage img = image.convertToFormat(QImage::Format_RGB32);
+    const int w = img.width();
+    const int h = img.height();
+    if (w <= 0 || h <= 0) {
+        return regions;
+    }
+
+    const int maxScan = qMin(FIXED_REGION_DETECTION_HEIGHT, h / 3); // 限制扫描高度
+    const double varianceThreshold = 30.0; // 行内像素方差阈值（越小说明越“单调/固定”）
+
+    auto rowVariance = [&](int y) -> double {
+        const uchar* line = img.constScanLine(y);
+        // 计算灰度均值与方差
+        double sum = 0.0;
+        double sum2 = 0.0;
+        for (int x = 0; x < w; ++x) {
+            const QRgb px = reinterpret_cast<const QRgb*>(line)[x];
+            const int r = qRed(px);
+            const int g = qGreen(px);
+            const int b = qBlue(px);
+            const double gray = 0.299 * r + 0.587 * g + 0.114 * b;
+            sum += gray;
+            sum2 += gray * gray;
+        }
+        const double mean = sum / w;
+        const double var = qMax(0.0, (sum2 / w) - (mean * mean));
+        return var;
+    };
+
+    // 从顶部向下扫描
+    int topHeight = 0;
+    for (int y = 0; y < maxScan; ++y) {
+        if (rowVariance(y) <= varianceThreshold) {
+            ++topHeight;
+        } else {
+            break;
+        }
+    }
+    // 过滤过小区域噪声
+    if (topHeight >= 4) {
+        regions.hasTopRegion = true;
+        regions.topRegion = QRect(0, 0, w, topHeight);
+    }
+
+    // 从底部向上扫描
+    int bottomHeight = 0;
+    for (int y = 0; y < maxScan; ++y) {
+        if (rowVariance(h - 1 - y) <= varianceThreshold) {
+            ++bottomHeight;
+        } else {
+            break;
+        }
+    }
+    if (bottomHeight >= 4) {
+        regions.hasBottomRegion = true;
+        regions.bottomRegion = QRect(0, h - bottomHeight, w, bottomHeight);
+    }
+
+    return regions;
 }

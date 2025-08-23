@@ -11,6 +11,16 @@
 #include <QImage>
 #include <QDateTime>
 #include <QCryptographicHash>
+#include <QQueue>
+#include <QMutex>
+#include <QThread>
+#include <QWaitCondition>
+#include <QEvent>
+#include <QWheelEvent>
+
+// 新增：OpenCV 头文件
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
 
 enum class ScrollDirection {
     None,
@@ -61,6 +71,29 @@ struct GlobalContentRegion {
     int order = 0;
 };
 
+// 添加新的结构体用于 OpenCV 模板匹配
+struct TemplateMatchResult {
+    cv::Point matchLocation;
+    double maxVal = 0.0;
+    bool isValid = false;
+    int overlapHeight = 0;
+};
+
+// 截图任务队列项
+struct CaptureTask {
+    QPixmap screenshot;
+    qint64 timestamp;
+    int taskId;
+};
+
+// 固定区域信息
+struct FixedRegion {
+    QRect topRegion;    // 顶部固定区域（工具栏等）
+    QRect bottomRegion; // 底部固定区域（状态栏等）
+    bool hasTopRegion = false;
+    bool hasBottomRegion = false;
+};
+
 class ScreenshotCapture : public QObject
 {
     Q_OBJECT
@@ -68,45 +101,33 @@ class ScreenshotCapture : public QObject
 public:
     explicit ScreenshotCapture(QObject *parent = nullptr);
     ~ScreenshotCapture();
-
-    // 设置截图区域
-    void setCapturezone(const QRect& rect);
-    
-    // 开始/停止滚动截图
-    void startScrollCapture();
-    void stopScrollCapture();
-    
-    // 获取合并后的截图
+    // 兼容旧接口
     QPixmap getCombinedImage() const;
-    
-    // 获取当前拼接的图片（实时）
     QPixmap getCurrentCombinedImage() const;
-    
-    // 获取捕获的图片列表
+    void setDetectionInterval(int interval);
+    // 新增公开接口
     QList<QPixmap> getCapturedImages() const;
-    
-    // 清空已捕获的图片
     void clearCapturedImages();
-    
-    // 设置检测间隔
-    void setDetectionInterval(int intervalMs);
-    
-    // 获取状态
     bool isCapturing() const;
     int getCaptureCount() const;
     
-    // 测试截图功能
-    QPixmap captureRegion(const QRect& rect);
-
-signals:
-    void imagesCaptured(const QList<QPixmap>& images);
-    void newImageCaptured(const QPixmap& image);
-    void captureFinished(const QPixmap& combinedImage);
-    void captureStatusChanged(const QString& status);
-    void scrollDetected(ScrollDirection direction, int offset);
+    // 滚动截屏控制
+    void setCapturezone(const QRect& rect);
+    void startScrollCapture();
+    void stopScrollCapture();
+    void fixedRegionsDetected(const FixedRegion& regions);
 
 private slots:
     void onScrollDetectionTimer();
+    void processStitchingQueue(); // 新增：处理拼接队列
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
+signals:
+    void captureStatusChanged(const QString& status);
+    void newImageCaptured(const QPixmap& image);
+    void captureFinished(const QPixmap& combinedImage);
+    void scrollDetected(ScrollDirection direction, int offset);
 
 private:
     void updateGlobalBounds(const QRect& rect);
@@ -133,6 +154,8 @@ private:
     void addToCoveredRegions(const QPixmap& newContent, const QRect& logicalRect, ScrollDirection direction, int captureOrder);
     QPixmap combineImages() const;
     void updateCaptureStatus();
+    // 新增私有接口
+    QPixmap captureRegion(const QRect& rect);
 
     QTimer* m_detectionTimer;
     QScreen* m_primaryScreen;
@@ -157,6 +180,7 @@ private:
     int m_duplicateSkipCount; // 跳过重复内容的次数
     int m_consecutiveDuplicates;  // 连续重复计数
     qint64 m_lastDuplicateTime;   // 上次重复检测时间
+    qint64 m_lastWheelCaptureMs = 0; // 上次滚轮触发的捕获时间
     
     bool m_isCapturing;
     int m_captureCount;
@@ -170,6 +194,37 @@ private:
      static const int MIN_NEW_CONTENT_HEIGHT = 10;       // 最小新内容高度（允许较小的滚动）
      static const int MIN_OVERLAP_HEIGHT = 10;           // 最小重叠高度
      static const int MAX_ALLOWED_DUPLICATES = 3;        // 最大允许连续重复次数
+
+    // 新增方法
+    void enableAdvancedStitching(bool enabled);
+    void setFixedRegions(const FixedRegion& regions);
+    void setTemplateMatchThreshold(double threshold);
+
+    // 新增 OpenCV 相关方法
+    TemplateMatchResult performTemplateMatching(const cv::Mat& sourceImage, 
+                                              const cv::Mat& templateImage);
+    cv::Mat qImageToCvBgr(const QImage& qImage) const;
+    cv::Mat qImageToCvMat(const QImage& qImage);
+    QImage cvMatToQImage(const cv::Mat& cvMat);
+    FixedRegion detectFixedRegions(const QImage& image);
+    QImage cropFixedRegions(const QImage& image, const FixedRegion& regions);
+    QImage restoreFixedRegions(const QImage& stitchedImage, const FixedRegion& regions, 
+                              const QImage& topRegion, const QImage& bottomRegion);
+    OverlapResult findOverlapRegionWithOpenCV(const QImage& img1, const QImage& img2, 
+                                            ScrollDirection direction);
+
+private:
+    // ... existing methods ...
+
+    // 新增成员变量
+    bool m_useAdvancedStitching = true;      // 是否启用 OpenCV 模板匹配
+    double m_templateMatchThreshold = 0.80;  // 模板匹配阈值
+    FixedRegion m_fixedRegions;              // 固定区域配置
+    
+    // OpenCV 相关常量
+    static const int TEMPLATE_HEIGHT = 50;   // 模板高度（行数）
+    static constexpr double DEFAULT_MATCH_THRESHOLD = 0.8;  // 默认匹配阈值
+    static const int FIXED_REGION_DETECTION_HEIGHT = 100;   // 固定区域检测高度
 };
 
 #endif // SCREENSHOTCAPTURE_H
